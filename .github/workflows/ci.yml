@@ -1,0 +1,151 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.8, 3.9, "3.10", "3.11", "3.12"]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Install package in development mode
+      run: |
+        pip install -e .
+
+    - name: Run code formatting check (Black)
+      run: |
+        black --check --diff benchmark/ tests/ scripts/
+
+    - name: Run import sorting check (isort)
+      run: |
+        isort --check-only --diff benchmark/ tests/ scripts/
+
+    - name: Run linting (flake8)
+      run: |
+        flake8 benchmark/ tests/ scripts/ --max-line-length=79 --extend-ignore=E203,W503 --show-source --statistics
+
+    - name: Run type checking (MyPy)
+      run: |
+        mypy benchmark/ --ignore-missing-imports --strict-optional --warn-redundant-casts --warn-unused-ignores
+
+    - name: Run tests with coverage
+      run: |
+        pytest tests/ --cov=benchmark --cov-report=term-missing --cov-report=xml --cov-fail-under=80 -v
+
+    - name: Upload coverage to Codecov
+      if: matrix.python-version == '3.11'
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
+
+    - name: Run audit script
+      run: |
+        python scripts/audit.py
+
+  benchmark-test:
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -e .
+
+    - name: Test CLI functionality
+      run: |
+        python -m benchmark.cli --help
+        python -m benchmark.cli -p TestProduct1 TestProduct2 -i 10 --json --csv --verbose
+
+    - name: Test direct module usage
+      run: |
+        python -c "
+        from benchmark.bench import measure_products, analyze_results
+        results = measure_products(['Product1', 'Product2'], iterations=5)
+        analysis = analyze_results(results)
+        print('✅ Module test passed')
+        print(f'Results: {results}')
+        print(f'Analysis: {analysis}')
+        "
+
+    - name: Archive benchmark results
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-results
+        path: benchmark_results/
+        retention-days: 7
+
+  security-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+        
+    - name: Install security tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install safety bandit[toml]
+        
+    - name: Run safety check
+      run: |
+        safety check --json || true
+        
+    - name: Run bandit security linter
+      run: |
+        bandit -r benchmark/ -f json -o bandit-report.json || true
+        bandit -r benchmark/ || true
+
+    - name: Upload security scan results
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-scan-results
+        path: |
+          bandit-report.json
+        retention-days: 30
